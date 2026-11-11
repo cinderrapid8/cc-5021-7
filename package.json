@@ -1,0 +1,10 @@
+{
+  "name": "mechanical-rig-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "科技馆机械角色动画演示器：程序化零件、转动/滑动关节、曲线驱动、末端轨迹与解析核对",
+  "scripts": {
+    "test": "node tests/smoke.js && node -e \"global.__MR_NODE=true;require('./js/math3d.js');require('./js/rig.js');require('./js/kinematics.js');require('./js/tests.js');\" && node tests/render-check.js",
+    "serve": "python3 -m http.server 8123"
+  }
+}
