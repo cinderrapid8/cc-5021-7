@@ -12,7 +12,9 @@
     camera: new MR.OrbitCamera(),
     renderer: null,
     inspector: null,
+    closure: null,
     currentPose: null,
+    lastSolverReport: null,
     saveTimer: null,
 
     init() {
@@ -20,6 +22,8 @@
       this.renderer = new MR.Renderer($('#view'));
       this.inspector = MR.Inspector.buildInspector(this);
       $('#inspector-host').appendChild(this.inspector.element);
+      this.closure = MR.Closure.buildClosurePanel(this);
+      $('#closure-host').appendChild(this.closure.element);
       this.bindCanvas();
       this.bindToolbar();
       this.bindTimeline();
@@ -31,6 +35,67 @@
       requestAnimationFrame((ts) => this.tick(ts));
       window.addEventListener('resize', () => this.resize());
       this.resize();
+    },
+
+    clearSolverSeed() {
+      state.solverSeed = null;
+    },
+
+    /* Solve the rig at an exact time. Tree rigs use the original direct FK
+     * path; constrained rigs go through the iterative solver. Returns the
+     * pose and stashes the diagnostic report for the closure panel. */
+    solveAt(t) {
+      const rig = state.rig;
+      if (!MR.Solver.hasConstraints(rig)) {
+        this.lastSolverReport = null;
+        return MR.Kinematics.evaluate(rig, t);
+      }
+      const rep = MR.Solver.solve(rig, t, { guess: state.solverSeed || undefined });
+      this.lastSolverReport = rep;
+      if (rep.converged) state.solverSeed = rep.seed;
+      return rep.pose;
+    },
+
+    /* Advance a constrained rig toward target time with bounded substeps.
+     * If a substep fails, the remaining interval is retried once with halved
+     * step size; a persistent failure pauses playback and records the frame. */
+    advanceConstrained(targetT, depth = 0) {
+      const rig = state.rig;
+      const fromT = state.time;
+      const total = targetT - fromT;
+      if (Math.abs(total) < 1e-12) return this.solveAt(targetT);
+      const baseN = Math.max(1, Math.min(8, state.subSteps || 4));
+      const n = depth === 0 ? baseN : Math.min(8, baseN * 2);
+      const h = total / n;
+      let pose = null;
+      for (let i = 1; i <= n; i++) {
+        const tt = fromT + h * i;
+        const rep = MR.Solver.solve(rig, tt, { guess: state.solverSeed || undefined });
+        this.lastSolverReport = rep;
+        if (rep.converged) {
+          state.solverSeed = rep.seed;
+          state.time = tt;
+          pose = rep.pose;
+          continue;
+        }
+        if (depth === 0) {
+          // one finer retry over the remaining interval from the last good time
+          return this.advanceConstrained(targetT, 1);
+        }
+        state.playing = false;
+        $('#btn-play').textContent = '播放';
+        if (!this._lastFailureAt || Math.abs(this._lastFailureAt - tt) > 1e-9) {
+          this.closure.recordFailure(rep);
+          this._lastFailureAt = tt;
+        }
+        this.flash(
+          `t=${tt.toFixed(2)}s 求解失败（${MR.Closure.STATUS_TEXT[rep.status] || rep.status}），已暂停并记录失败帧：${rep.warnings[0] || '残差无法收敛'}`,
+          true
+        );
+        return rep.pose;
+      }
+      this._lastFailureAt = null;
+      return pose;
     },
 
     /* ---------- persistence ---------- */
@@ -113,7 +178,11 @@
         ['#preset-char', () => MR.Rig.buildMechCharacter()],
         ['#preset-twolink', () => MR.Rig.buildTwoLink()],
         ['#preset-slide', () => MR.Rig.buildSlide()],
-        ['#preset-limit', () => MR.Rig.buildLimitDemo()]
+        ['#preset-limit', () => MR.Rig.buildLimitDemo()],
+        ['#preset-fourbar', () => MR.Rig.buildFourBar()],
+        ['#preset-dualarm', () => MR.Rig.buildDualArm()],
+        ['#preset-overcon', () => MR.Rig.buildOverConstrained()],
+        ['#preset-deadpoint', () => MR.Rig.buildDeadPoint()]
       ];
       for (const [sel, builder] of presets) {
         $(sel).addEventListener('click', () => this.loadRig(builder()));
@@ -146,6 +215,7 @@
       state.rig = rig;
       state.selectedId = rig.nodes[0]?.id ?? null;
       state.time = 0;
+      state.solverSeed = null;
       this.renderer.clearTrail();
       this.refreshAll();
       this.scheduleSave();
@@ -200,6 +270,12 @@
         const badgeClass = { 滑: 'b-slide', 连: 'b-cont', 转: 'b-rev', 固: 'b-fix' }[badge];
         row.innerHTML = `<span class="badge ${badgeClass}">${badge}</span><span class="tree-name"></span>`;
         row.querySelector('.tree-name').textContent = node.name;
+        if (node.driven === false && node.joint.type !== 'fixed') {
+          const freeTag = document.createElement('span');
+          freeTag.className = 'tree-free';
+          freeTag.textContent = '自由';
+          row.appendChild(freeTag);
+        }
         if (dangling.has(node.id)) {
           const warn = document.createElement('span');
           warn.className = 'tree-warn';
@@ -262,6 +338,8 @@
       const slider = $('#time-slider');
       slider.addEventListener('input', (e) => {
         state.time = parseFloat(e.target.value);
+        // a manual scrub is a parameter jump: do not trust the warm-start seed
+        state.solverSeed = null;
       });
       slider.addEventListener('pointerdown', () => {
         this._wasPlaying = state.playing;
@@ -275,9 +353,16 @@
         state.duration = Math.max(0.5, parseFloat(e.target.value) || 8);
       });
       $('#speed').addEventListener('change', (e) => {
-        state.speed = Math.max(0.1, parseFloat(e.target.value) || 1);
+        state.speed = Math.max(-5, Math.min(5, parseFloat(e.target.value) || 1));
       });
       $('#loop').addEventListener('change', (e) => { state.loop = e.target.checked; });
+      const sub = $('#substeps');
+      if (sub) {
+        sub.value = String(state.subSteps);
+        sub.addEventListener('change', () => {
+          state.subSteps = Math.max(1, Math.min(8, parseInt(sub.value, 10) || 4));
+        });
+      }
     },
 
     /* ---------- matrix panel ---------- */
@@ -317,6 +402,7 @@
         `关节轴（局部）${axisTxt(f.axisLocal)}<br>` +
         `关节轴（世界）${axisTxt(f.axisWorld)}<br>` +
         `曲线原始值 ${fmt(f.raw)} ${node.joint.unit} → 应用值 ${fmt(f.applied)} ${node.joint.unit}` +
+        (f.solverOwned ? ' <span class="clamp-tag solver-tag">闭环求解值</span>' : '') +
         (f.clamped ? ` <span class="clamp-tag">${f.status === 'clamped-low' ? '已触下限' : '已触上限'}</span>` : '');
       host.appendChild(info);
     },
@@ -357,8 +443,23 @@
         ? clamped.map((f) => `${f.node.name}:${f.status === 'clamped-low' ? '下限' : '上限'}`).join('；')
         : '所有关节在限制范围内';
       $('#status-limit').className = clamped.length ? 'limit-warn' : 'limit-ok';
-      if (pose.errors.length) {
-        $('#status-errors').textContent = pose.errors.join(' | ');
+      const errs = [...pose.errors];
+      const rep = this.lastSolverReport;
+      const solverEl = $('#status-solver');
+      if (rep && MR.Solver.hasConstraints(state.rig)) {
+        const res = rep.finalResidual ? rep.finalResidual.maxAbs : null;
+        const txt = rep.converged
+          ? `闭环已闭合 · 残差 ${fmtSci(res)} m · 迭代 ${rep.iterations} 次`
+          : `闭环失败：${MR.Closure.STATUS_TEXT[rep.status] || rep.status} · 残差 ${fmtSci(res)} m`;
+        solverEl.textContent = txt;
+        solverEl.className = rep.converged ? 'solver-ok' : 'solver-bad';
+        if (!rep.converged) errs.push(...rep.warnings);
+      } else {
+        solverEl.textContent = '';
+        solverEl.className = '';
+      }
+      if (errs.length) {
+        $('#status-errors').textContent = errs.join(' | ');
         $('#status-errors').classList.add('show');
       } else {
         $('#status-errors').classList.remove('show');
@@ -370,20 +471,36 @@
       if (state.lastWall == null) state.lastWall = ts;
       const dt = Math.min(0.05, (ts - state.lastWall) / 1000);
       state.lastWall = ts;
+      const constrained = MR.Solver.hasConstraints(state.rig);
       if (state.playing) {
-        state.time += dt * state.speed;
-        if (state.loop && state.time > state.duration) {
-          state.time = state.time % state.duration;
-          this.renderer.clearTrail();
+        const before = state.time;
+        let target = before + dt * state.speed;
+        let wrapped = false;
+        if (state.loop) {
+          if (target > state.duration) { target = target % state.duration; wrapped = true; }
+          if (target < 0) { target = ((target % state.duration) + state.duration) % state.duration; wrapped = true; }
+        } else {
+          target = Math.max(0, Math.min(target, state.duration));
         }
-        state.time = Math.min(state.time, state.duration);
+        let pose;
+        if (constrained) {
+          if (wrapped) state.solverSeed = null; // restart assembly after wrap
+          pose = this.advanceConstrained(target);
+        } else {
+          state.time = target;
+          pose = MR.Kinematics.evaluate(state.rig, state.time);
+        }
+        this.currentPose = pose;
+        if (wrapped) this.renderer.clearTrail();
+      } else {
+        this.currentPose = this.solveAt(state.time);
       }
-      const pose = MR.Kinematics.evaluate(state.rig, state.time);
-      this.currentPose = pose;
+      const pose = this.currentPose;
       if (state.showTrail && pose.tipPosition) this.renderer.addTrailPoint(pose.tipPosition);
-      this.renderer.render(pose, this.camera, state.rig, state.selectedId);
+      this.renderer.render(pose, this.camera, state.rig, state.selectedId, this.lastSolverReport);
       this.renderMatrix(pose);
       this.renderStatus(pose);
+      if (this.closure) this.closure.rerender();
       $('#time-label').textContent = `t = ${state.time.toFixed(2)} s`;
       const slider = $('#time-slider');
       slider.max = String(state.duration);
@@ -394,6 +511,7 @@
     refreshAll() {
       this.renderTree();
       this.inspector.rerender();
+      this.closure?.rerender();
       this._rerenderRoot?.();
       this.scheduleSave();
     }
@@ -401,6 +519,13 @@
 
   function fmt(v) {
     return (Math.round(v * 1000) / 1000).toString();
+  }
+
+  function fmtSci(v) {
+    if (v === null || v === undefined) return '—';
+    if (!Number.isFinite(v)) return '∞';
+    if (v === 0) return '0';
+    return v.toExponential(2);
   }
 
   global.MRApp = app;

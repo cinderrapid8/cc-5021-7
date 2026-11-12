@@ -24,6 +24,12 @@
       <button id="preset-limit" class="btn">极限演示</button>
     </div>
     <div class="btn-group">
+      <button id="preset-fourbar" class="btn accent">四杆闭环</button>
+      <button id="preset-dualarm" class="btn accent">双支链末端</button>
+      <button id="preset-overcon" class="btn accent">过约束冲突</button>
+      <button id="preset-deadpoint" class="btn accent">死点演示</button>
+    </div>
+    <div class="btn-group">
       <button id="btn-save" class="btn">保存</button>
       <button id="btn-export" class="btn">导出 JSON</button>
       <button id="btn-import" class="btn">导入 JSON</button>
@@ -64,7 +70,10 @@
         <input type="number" id="duration" value="8" min="0.5" step="0.5" class="num tiny">s
       </label>
       <label class="tl-field">倍速
-        <input type="number" id="speed" value="1" min="0.1" step="0.1" class="num tiny">
+        <input type="number" id="speed" value="1" min="-5" max="5" step="0.1" class="num tiny">
+      </label>
+      <label class="tl-field" title="闭环求解每帧最大子步数；失败时自动减半步长重试">子步
+        <input type="number" id="substeps" value="4" min="1" max="8" step="1" class="num tiny">
       </label>
       <label class="chk"><input type="checkbox" id="loop" checked> 循环</label>
       <button id="btn-clear-trail" class="btn">清轨迹</button>
@@ -75,12 +84,14 @@
     <div class="tabs">
       <button class="tab active" data-tab="inspector-host">属性</button>
       <button class="tab" data-tab="matrix-host">矩阵</button>
+      <button class="tab" data-tab="closure-host">闭环求解</button>
       <button class="tab" data-tab="tests-host">解析核对</button>
     </div>
     <div id="inspector-host" class="tab-body active scroll"></div>
     <div id="matrix-host" class="tab-body scroll">
       <div id="matrix-panel" class="matrix-panel"></div>
     </div>
+    <div id="closure-host" class="tab-body scroll"></div>
     <div id="tests-host" class="tab-body scroll">
       <div id="tests-summary" class="summary"></div>
       <div id="tests-panel" class="tests-panel"></div>
@@ -92,17 +103,21 @@
 <footer class="statusbar">
   <span>末端位置：<b id="status-tip">—</b></span>
   <span id="status-limit" class="limit-ok">—</span>
+  <span id="status-solver"></span>
   <span id="status-errors" class="status-errors"></span>
 </footer>
 
 <div id="flash" class="flash"></div>
 
 <script src="js/math3d.js"></script>
+<script src="js/lineq.js"></script>
 <script src="js/rig.js"></script>
 <script src="js/kinematics.js"></script>
+<script src="js/solver.js"></script>
 <script src="js/renderer.js"></script>
 <script src="js/state.js"></script>
 <script src="js/inspector.js"></script>
+<script src="js/closure.js"></script>
 <script src="js/tests.js"></script>
 <script src="js/app.js"></script>
 <script>

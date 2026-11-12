@@ -1,7 +1,9 @@
 global.__MR_NODE = true;
 require('/workspace/js/math3d.js');
+require('/workspace/js/lineq.js');
 require('/workspace/js/rig.js');
 require('/workspace/js/kinematics.js');
+require('/workspace/js/solver.js');
 require('/workspace/js/renderer.js');
 
 const fakeCanvas = {
@@ -18,13 +20,27 @@ for (const [name, build] of [
   ['角色', MR.Rig.buildMechCharacter],
   ['两节臂', MR.Rig.buildTwoLink],
   ['滑轨', MR.Rig.buildSlide],
-  ['极限', MR.Rig.buildLimitDemo]
+  ['极限', MR.Rig.buildLimitDemo],
+  ['四杆', MR.Rig.buildFourBar],
+  ['双支链', MR.Rig.buildDualArm],
+  ['过约束', MR.Rig.buildOverConstrained],
+  ['死点', MR.Rig.buildDeadPoint]
 ]) {
   const rig = build();
+  let seed = null;
   for (const t of [0, 0.7, 1.5, 3.1]) {
-    const pose = MR.Kinematics.evaluate(rig, t);
+    let pose;
+    let report = null;
+    if (MR.Solver.hasConstraints(rig)) {
+      const rep = MR.Solver.solve(rig, t, seed ? { guess: seed } : {});
+      if (rep.converged) seed = rep.seed;
+      pose = rep.pose;
+      report = rep;
+    } else {
+      pose = MR.Kinematics.evaluate(rig, t);
+    }
     if (pose.tipPosition) r.addTrailPoint(pose.tipPosition);
-    r.render(pose, cam, rig, rig.nodes[0].id);
+    r.render(pose, cam, rig, rig.nodes[0].id, report);
   }
   console.log(name, 'OK, trail points =', r.trail.length);
   r.clearTrail();

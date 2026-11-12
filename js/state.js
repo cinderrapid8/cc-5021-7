@@ -18,7 +18,12 @@
     showAllAxes: false,
     showLabels: true,
     showTrail: true,
-    autoSave: true
+    autoSave: true,
+    // closure solver: warm-start seed from the previous accepted frame and
+    // frames that could not be assembled (exported for reproduction)
+    solverSeed: null,
+    failedFrames: [],
+    subSteps: 4
   };
 
   function serialize() {
@@ -31,6 +36,8 @@
       duration: state.duration,
       speed: state.speed,
       loop: state.loop,
+      subSteps: state.subSteps,
+      failedFrames: state.failedFrames,
       view: {
         showGrid: state.showGrid,
         showAllAxes: state.showAllAxes,
@@ -49,6 +56,9 @@
     state.duration = data.duration || 8;
     state.speed = data.speed || 1;
     state.loop = data.loop !== false;
+    state.subSteps = data.subSteps || 4;
+    state.failedFrames = Array.isArray(data.failedFrames) ? data.failedFrames : [];
+    state.solverSeed = null;
     if (data.view) Object.assign(state, data.view);
     const exists = state.rig.nodes.some((n) => n.id === state.selectedId);
     if (!exists) state.selectedId = state.rig.nodes[0]?.id ?? null;

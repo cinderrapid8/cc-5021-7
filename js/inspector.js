@@ -139,6 +139,15 @@
         field('关节轴 (局部坐标)', el('div', { class: 'vec-row' }, ...vec3Inputs(j.axis, 0.1, refresh)))
       ];
       if (j.type !== 'fixed') {
+        const drivenChk = el('input', { type: 'checkbox' });
+        drivenChk.checked = node.driven !== false;
+        drivenChk.addEventListener('change', () => {
+          node.driven = drivenChk.checked;
+          MR.State.state.solverSeed = null;
+          refresh();
+        });
+        jointKids.push(el('label', { class: 'check-line' }, drivenChk,
+          '驱动关节（取时间曲线值；取消勾选则成为闭环求解的自由未知量）'));
         jointKids.push(field('限制类型', limitSel));
         if (j.limitType === 'range' && j.type !== 'continuous') {
           jointKids.push(field('下限 ' + j.unit, numInput(j.min, 1, (v) => { j.min = v; refresh(); })));

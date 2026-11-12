@@ -60,7 +60,12 @@
         partOffset: Array.isArray(partial.part?.partOffset) ? [...partial.part.partOffset] : [0, 0, 0]
       },
 
-      showAxes: !!partial.showAxes
+      showAxes: !!partial.showAxes,
+
+      // Closure-loop role. A driven joint takes its value from its time curve
+      // (the actuator); a free joint (driven=false) is an unknown solved from
+      // the closure constraints. Fixed joints can never be free.
+      driven: partial.driven !== undefined ? !!partial.driven : true
     };
     return node;
   }
@@ -73,8 +78,67 @@
         position: [0, 0, 0],
         eulerDeg: [0, 0, 0]
       },
-      nodes: []
+      nodes: [],
+      // Closure constraints coupling nodes of the (still tree-shaped) hierarchy.
+      // type: 'coincident' | 'distance'. Empty array => pure tree, direct FK.
+      constraints: []
     };
+  }
+
+  /* ---------- closure constraints ---------- */
+  let _cseq = 1;
+  const cid = () => `cstr_${(_cseq++).toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const CONSTRAINT_TYPES = ['coincident', 'distance'];
+  const CONSTRAINT_AXES = ['x', 'y', 'z'];
+
+  function createConstraint(partial) {
+    const c = {
+      id: partial.id || cid(),
+      name: partial.name || '闭合约束',
+      type: CONSTRAINT_TYPES.includes(partial.type) ? partial.type : 'coincident',
+      nodeA: partial.nodeA || null,
+      nodeB: partial.nodeB || null,
+      // Anchor points measured in each node's own joint frame (metres).
+      offsetA: Array.isArray(partial.offsetA) ? [...partial.offsetA] : [0, 0, 0],
+      offsetB: Array.isArray(partial.offsetB) ? [...partial.offsetB] : [0, 0, 0],
+      // distance constraints only: required separation (metres).
+      distance: partial.distance ?? 0,
+      // Which world axes participate. Planar four-bars use ['x','y']; a full
+      // 3D pin uses all three. Fewer equations = fewer required unknowns.
+      axes: Array.isArray(partial.axes) && partial.axes.length
+        ? partial.axes.filter((a) => CONSTRAINT_AXES.includes(a))
+        : ['x', 'y', 'z'],
+      enabled: partial.enabled !== false
+    };
+    return c;
+  }
+
+  /* Structural checks independent of any pose. */
+  function validateConstraints(rig) {
+    const byId = new Map(rig.nodes.map((n) => [n.id, n]));
+    const errors = [];
+    const list = rig.constraints || [];
+    const seen = new Set();
+    for (const c of list) {
+      if (seen.has(c.id)) errors.push(`约束「${c.name}」(${c.id}) id 重复`);
+      seen.add(c.id);
+      if (!CONSTRAINT_TYPES.includes(c.type)) {
+        errors.push(`约束「${c.name}」类型未知: ${c.type}`);
+        continue;
+      }
+      if (!byId.has(c.nodeA) || !byId.has(c.nodeB)) {
+        errors.push(`约束「${c.name}」引用了不存在的节点，已跳过`);
+        continue;
+      }
+      if (c.nodeA === c.nodeB) {
+        errors.push(`约束「${c.name}」的两个端点不能是同一节点`);
+      }
+      if (!c.axes.length) errors.push(`约束「${c.name}」至少需要一个参与轴`);
+      if (c.type === 'distance' && (!(c.distance >= 0) || !isFinite(c.distance))) {
+        errors.push(`约束「${c.name}」的距离必须是非负有限值`);
+      }
+    }
+    return errors;
   }
 
   /* ---------- curves ---------- */
@@ -84,10 +148,10 @@
         return curve.base;
       case 'sine':
         return curve.base + curve.amplitude * Math.sin(
-          (2 * Math.PI * t) / Math.max(curve.period, 1e-6) + curve.phase
+          (2 * Math.PI * t) / Math.max(curve.period, 1e-6) + (curve.phase || 0)
         );
       case 'linear':
-        return curve.base + curve.speed * t;
+        return curve.base + (curve.speed || 0) * t;
       case 'keyframes': {
         const ks = [...curve.keyframes].sort((a, b) => a.t - b.t);
         if (ks.length === 0) return 0;
@@ -385,10 +449,189 @@
     return rig;
   }
 
+  /* =====================================================================
+   * Closed-loop samples. The hierarchy stays a tree; the loop is expressed
+   * only through rig.constraints. Joints marked driven:false are unknowns.
+   * All planar samples live in the XY plane with revolute axes +Z.
+   * ===================================================================== */
+
+  /* Planar crank-rocker four-bar (Grashof): ground O=A0, crank a=0.35,
+   * coupler b=1.0, rocker c=0.9, ground pivots d=1.1 apart.
+   * Tree: O -> crank -> coupler -> P ; ground pivot B is a second root node
+   * carrying the rocker -> Q. One coincident constraint closes P == Q. */
+  function buildFourBar() {
+    const rig = createRig('四杆机构 · 曲柄摇杆闭环');
+    const O = createNode({
+      name: '机架铰点 O', parentId: null,
+      joint: { type: 'fixed' },
+      part: { shape: 'cylinder', size: [0.07, 0.05, 0.07], color: '#8a93a6' }
+    });
+    const crank = createNode({
+      name: '曲柄 A (驱动, a=0.35)', parentId: O.id,
+      joint: { type: 'continuous', axis: [0, 0, 1], unit: 'deg', limitType: 'continuous', min: 0, max: 0 },
+      curve: { mode: 'linear', base: 0, speed: 45 },
+      part: { shape: 'cylinder', size: [0.025, 0.35, 0.025], color: '#ffb347', partOffset: [0.175, 0, 0] }
+    });
+    const coupler = createNode({
+      name: '连杆 B (自由铰, b=1.0)', parentId: crank.id,
+      mount: { offset: [0.35, 0, 0] },
+      joint: { type: 'revolute', axis: [0, 0, 1], unit: 'deg', limitType: 'continuous', min: 0, max: 0 },
+      driven: false,
+      curve: { mode: 'hold', base: -30 },
+      part: { shape: 'cylinder', size: [0.022, 1, 0.022], color: '#6ea8ff', partOffset: [0.5, 0, 0] }
+    });
+    const P = createNode({
+      name: '耦合点 P (连杆端)', parentId: coupler.id,
+      mount: { offset: [1, 0, 0] },
+      joint: { type: 'fixed' },
+      part: { shape: 'sphere', size: [0.06, 0.06, 0.06], color: '#7dffc8' },
+      showAxes: true
+    });
+    const B = createNode({
+      name: '机架铰点 B (d=1.1)', parentId: null,
+      mount: { offset: [1.1, 0, 0] },
+      joint: { type: 'fixed' },
+      part: { shape: 'cylinder', size: [0.07, 0.05, 0.07], color: '#8a93a6' }
+    });
+    const rocker = createNode({
+      name: '摇杆 C (自由铰, c=0.9)', parentId: B.id,
+      joint: { type: 'revolute', axis: [0, 0, 1], unit: 'deg', limitType: 'continuous', min: 0, max: 0 },
+      driven: false,
+      curve: { mode: 'hold', base: 75 },
+      part: { shape: 'cylinder', size: [0.025, 0.9, 0.025], color: '#9d8cff', partOffset: [0.45, 0, 0] }
+    });
+    const Q = createNode({
+      name: '耦合点 Q (摇杆端)', parentId: rocker.id,
+      mount: { offset: [0.9, 0, 0] },
+      joint: { type: 'fixed' },
+      part: { shape: 'sphere', size: [0.055, 0.055, 0.055], color: '#ff6b8a' }
+    });
+    rig.nodes.push(O, crank, coupler, P, B, rocker, Q);
+    rig.tipNodeId = P.id;
+    rig.constraints.push(createConstraint({
+      name: 'P=Q 销轴闭合 (XY)',
+      type: 'coincident', nodeA: P.id, nodeB: Q.id, axes: ['x', 'y']
+    }));
+    return rig;
+  }
+
+  /* Two independent planar arms whose tips share one end effector.
+   * Each arm has 2 revolute joints; only arm-1 joints are driven, arm-2 is
+   * fully solved. Two assembly branches (elbow up / elbow down) exist.
+   * Base separation 1.2 m stays inside arm-2's reach [0.1, 1.1] margin across
+   * the whole driven sweep, so the closure never leaves its envelope. */
+  function buildDualArm() {
+    const rig = createRig('双支链共末端 · 多解分支');
+    const O1 = createNode({
+      name: '支链1 基座 O1', parentId: null,
+      joint: { type: 'fixed' },
+      part: { shape: 'cylinder', size: [0.06, 0.04, 0.06], color: '#8a93a6' }
+    });
+    const a1 = createNode({
+      name: '支链1 肩 (驱动)', parentId: O1.id,
+      joint: { type: 'revolute', axis: [0, 0, 1], unit: 'deg', min: -360, max: 360 },
+      curve: { mode: 'sine', base: 55, amplitude: 15, period: 8 },
+      part: { shape: 'cylinder', size: [0.024, 0.7, 0.024], color: '#ffb347', partOffset: [0.35, 0, 0] }
+    });
+    const a2 = createNode({
+      name: '支链1 肘 (驱动)', parentId: a1.id,
+      mount: { offset: [0.7, 0, 0] },
+      joint: { type: 'revolute', axis: [0, 0, 1], unit: 'deg', min: -360, max: 360 },
+      curve: { mode: 'sine', base: -70, amplitude: 10, period: 8, phase: 1.2 },
+      part: { shape: 'cylinder', size: [0.02, 0.7, 0.02], color: '#ffd98a', partOffset: [0.35, 0, 0] }
+    });
+    const E1 = createNode({
+      name: '共同末端 E', parentId: a2.id,
+      mount: { offset: [0.7, 0, 0] },
+      joint: { type: 'fixed' },
+      part: { shape: 'sphere', size: [0.07, 0.07, 0.07], color: '#7dffc8' },
+      showAxes: true
+    });
+    const O2 = createNode({
+      name: '支链2 基座 O2', parentId: null,
+      mount: { offset: [1.2, 0, 0] },
+      joint: { type: 'fixed' },
+      part: { shape: 'cylinder', size: [0.06, 0.04, 0.06], color: '#8a93a6' }
+    });
+    const b1 = createNode({
+      name: '支链2 肩 (自由)', parentId: O2.id,
+      joint: { type: 'revolute', axis: [0, 0, 1], unit: 'deg', limitType: 'continuous', min: 0, max: 0 },
+      driven: false,
+      curve: { mode: 'hold', base: 140 },
+      part: { shape: 'cylinder', size: [0.024, 0.6, 0.024], color: '#9d8cff', partOffset: [0.3, 0, 0] }
+    });
+    const b2 = createNode({
+      name: '支链2 肘 (自由)', parentId: b1.id,
+      mount: { offset: [0.6, 0, 0] },
+      joint: { type: 'revolute', axis: [0, 0, 1], unit: 'deg', limitType: 'continuous', min: 0, max: 0 },
+      driven: false,
+      curve: { mode: 'hold', base: -70 },
+      part: { shape: 'cylinder', size: [0.02, 0.5, 0.02], color: '#c0b3ff', partOffset: [0.25, 0, 0] }
+    });
+    const E2 = createNode({
+      name: '支链2 末端 (闭合到 E)', parentId: b2.id,
+      mount: { offset: [0.5, 0, 0] },
+      joint: { type: 'fixed' },
+      part: { shape: 'sphere', size: [0.05, 0.05, 0.05], color: '#ff6b8a' }
+    });
+    rig.nodes.push(O1, a1, a2, E1, O2, b1, b2, E2);
+    rig.tipNodeId = E1.id;
+    rig.constraints.push(createConstraint({
+      name: '两支链末端重合 (XY)',
+      type: 'coincident', nodeA: E1.id, nodeB: E2.id, axes: ['x', 'y']
+    }));
+    return rig;
+  }
+
+  /* Same four-bar geometry but with a second, conflicting distance constraint
+   * added so the constraint set is over-determined and generally inconsistent:
+   * the solver must report the residual instead of hiding it by moving inputs. */
+  function buildOverConstrained() {
+    const rig = buildFourBar();
+    rig.name = '过约束冲突演示 · 残差不可消除';
+    const crank = rig.nodes.find((n) => n.name.startsWith('曲柄'));
+    const rocker = rig.nodes.find((n) => n.name.startsWith('摇杆'));
+    rig.constraints.push(createConstraint({
+      name: '额外距离约束 (与销轴冲突)',
+      type: 'distance',
+      nodeA: crank.id, nodeB: rocker.id,
+      offsetA: [0.175, 0, 0], offsetB: [0.45, 0, 0],
+      distance: 0.3,
+      axes: ['x', 'y']
+    }));
+    return rig;
+  }
+
+  /* Rocker-driven four-bar. The actuator is placed on the rocker and sweeps a
+   * range wider than the geometric swing limits, so near the dead points the
+   * assembly ceases to exist and the solver reports unreachable / singular. */
+  function buildDeadPoint() {
+    const rig = buildFourBar();
+    rig.name = '死点 / 可达范围演示 · 摇杆驱动';
+    const crank = rig.nodes.find((n) => n.name.startsWith('曲柄'));
+    const rocker = rig.nodes.find((n) => n.name.startsWith('摇杆'));
+    crank.driven = false;
+    crank.joint.limitType = 'range';
+    crank.joint.min = -360;
+    crank.joint.max = 360;
+    crank.curve = { mode: 'hold', base: 0 };
+    rocker.driven = true;
+    rocker.joint.limitType = 'range';
+    // geometric swing for this geometry is about 95.7°..143.8°; the sine
+    // sweeps through it and overshoots both dead points
+    rocker.joint.min = -360;
+    rocker.joint.max = 360;
+    rocker.curve = { mode: 'sine', base: 120, amplitude: 30, period: 10, phase: 0 };
+    return rig;
+  }
+
   MR.Rig = {
     nid, createNode, createRig, evalCurve, jointValueToBase,
     validateHierarchy, canReparent, safeDelete,
+    createConstraint, validateConstraints, cid,
+    CONSTRAINT_TYPES, CONSTRAINT_AXES,
     buildMechCharacter, buildTwoLink, buildSlide, buildLimitDemo,
+    buildFourBar, buildDualArm, buildOverConstrained, buildDeadPoint,
     ANGLE_UNITS, LENGTH_UNITS, ANGLE_TO_RAD, LENGTH_TO_M
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -85,7 +85,7 @@ sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 
-for (const f of ['math3d.js', 'rig.js', 'kinematics.js', 'renderer.js', 'state.js', 'inspector.js', 'tests.js', 'app.js']) {
+for (const f of ['math3d.js', 'lineq.js', 'rig.js', 'kinematics.js', 'solver.js', 'renderer.js', 'state.js', 'inspector.js', 'closure.js', 'tests.js', 'app.js']) {
   const code = fs.readFileSync(path.join(__dirname, '..', 'js', f), 'utf8');
   vm.runInContext(code, sandbox, { filename: f });
 }
@@ -102,7 +102,7 @@ app.init();
 // first frame is scheduled via rAF, as in a real browser
 rafQueue.shift()(16);
 check('首帧生成姿态', !!app.currentPose);
-check('测试面板渲染了 8 项', (ids['#tests-panel']?.children.length || 0) === 8,
+check('测试面板渲染了 17 项', (ids['#tests-panel']?.children.length || 0) === 17,
   'children=' + ids['#tests-panel']?.children.length);
 check('层级树渲染了角色节点', (ids['#tree']?.children.length || 0) === 10);
 check('矩阵面板生成矩阵块', (ids['#matrix-panel']?.children.length || 0) >= 3);
@@ -153,6 +153,51 @@ const beforeCount = sandbox.MR.State.state.rig.nodes.length;
 app.addNode();
 check('添加节点进入层级', sandbox.MR.State.state.rig.nodes.length === beforeCount + 1);
 check('检查器已渲染选中节点', (ids['#inspector-host']?.children[0]?.children.length || 0) > 0);
+
+// closure presets: solver path, residual report and failed-frame capture
+app.loadRig(sandbox.MR.Rig.buildFourBar());
+rafQueue.shift()(300);
+check('四杆预设走求解器路径', app.lastSolverReport !== null && app.lastSolverReport.converged,
+  'residual=' + app.lastSolverReport?.finalResidual?.maxAbs);
+check('四杆闭合残差达容差', app.lastSolverReport.finalResidual.maxAbs < 1e-6);
+check('闭环面板已挂载并生成内容', (ids['#closure-host']?.children.length || 0) >= 1 &&
+  (ids['#closure-host']?.children[0]?.children.length || 0) >= 2);
+
+// drive the four-bar clock 30 frames: continuity via warm seed
+let fourBarFail = 0;
+for (let i = 0; i < 30; i++) {
+  const fn = rafQueue.shift();
+  fn(300 + 16 * i);
+  if (app.lastSolverReport && !app.lastSolverReport.converged) fourBarFail++;
+}
+check('四杆连续播放 30 帧全部收敛', fourBarFail === 0, 'fails=' + fourBarFail);
+
+// dead point rig: sweeping beyond the swing range must pause and record a frame
+app.loadRig(sandbox.MR.Rig.buildDeadPoint());
+sandbox.MR.State.state.time = 0;
+sandbox.MR.State.state.failedFrames = [];
+let recorded = 0;
+for (let i = 0; i < 120 && recorded === 0; i++) {
+  const fn = rafQueue.shift();
+  fn(400 + 16 * i);
+  recorded = sandbox.MR.State.state.failedFrames.length;
+}
+check('死点越界自动暂停并记录失败帧', recorded >= 1, 'frames=' + recorded);
+check('失败帧包含可复现 rig 与迭代日志',
+  !!sandbox.MR.State.state.failedFrames[0]?.rig?.constraints &&
+  Array.isArray(sandbox.MR.State.state.failedFrames[0]?.iterationsLog));
+
+// over-constrained rig keeps a non-zero residual
+app.loadRig(sandbox.MR.Rig.buildOverConstrained());
+rafQueue.shift()(500);
+check('过约束预设残差不可归零', app.lastSolverReport.converged === false &&
+  app.lastSolverReport.finalResidual.maxAbs > 0.01);
+check('状态栏显示闭环失败', ids['#status-solver']?.classList.contains('solver-bad'));
+
+// tree rigs still bypass the solver entirely
+app.loadRig(sandbox.MR.Rig.buildTwoLink());
+rafQueue.shift()(600);
+check('无闭环树状机构仍直接求值', app.lastSolverReport === null);
 
 console.log(`\n${failures === 0 ? 'ALL SMOKE TESTS PASSED' : failures + ' SMOKE FAILURE(S)'}`);
 process.exitCode = failures ? 1 : 0;

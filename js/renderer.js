@@ -121,7 +121,7 @@
       }
     }
 
-    render(pose, camera, rig, selectedId) {
+    render(pose, camera, rig, selectedId, solverReport) {
       const ctx = this.ctx;
       const w = this.canvas.width;
       const h = this.canvas.height;
@@ -140,6 +140,11 @@
       items.sort((a, b) => b.depth - a.depth);
       for (const it of items) it.draw();
 
+      // closure constraint links sit between solids and overlays
+      if (Array.isArray(rig.constraints) && rig.constraints.length) {
+        this.drawConstraints(rig, pose, camera, w, h, solverReport);
+      }
+
       // overlays drawn on top of solids
       if (this.showTrail) this.drawTrail(camera, w, h);
       for (const frame of pose.frames.values()) {
@@ -148,7 +153,70 @@
         if (this.showAllAxes || node.showAxes) this.drawAxes(frame, camera, w, h);
         if (this.showLabels) this.drawLabel(frame, camera, w, h);
         if (frame.clamped) this.drawClampWarning(frame, camera, w, h);
+        if (node.driven === false && node.joint.type !== 'fixed') {
+          this.drawRoleTag(frame, camera, w, h, '自由', '#7dffc8');
+        }
       }
+    }
+
+    /* Closure links: dashed line between the two anchor points, colour coded
+     * by that constraint's residual so a non-zero gap is visible immediately. */
+    drawConstraints(rig, pose, camera, w, h, solverReport) {
+      const residualById = new Map();
+      if (solverReport?.finalResidual?.perConstraint) {
+        for (const pc of solverReport.finalResidual.perConstraint) {
+          residualById.set(pc.id, pc.norm);
+        }
+      }
+      const tol = MR.Solver?.DEFAULTS?.tolerance ?? 1e-8;
+      for (const c of rig.constraints) {
+        if (c.enabled === false) continue;
+        const fA = pose.frames.get(c.nodeA);
+        const fB = pose.frames.get(c.nodeB);
+        if (!fA || !fB) continue;
+        const pA = M4.transformPoint(fA.world, c.offsetA);
+        const pB = M4.transformPoint(fB.world, c.offsetB);
+        const res = residualById.get(c.id) ?? 0;
+        const ok = res <= tol * 100;
+        const color = ok ? 'rgba(125,255,200,0.9)' : '#ff5d5d';
+        const pa = camera.project(pA, w, h);
+        const pb = camera.project(pB, w, h);
+        const ctx = this.ctx;
+        if (pa && pb) {
+          ctx.save();
+          ctx.setLineDash([6, 5]);
+          ctx.strokeStyle = color;
+          ctx.lineWidth = ok ? 1.6 : 2.4;
+          ctx.beginPath();
+          ctx.moveTo(pa.x, pa.y);
+          ctx.lineTo(pb.x, pb.y);
+          ctx.stroke();
+          ctx.restore();
+          ctx.fillStyle = color;
+          for (const p of [pa, pb]) {
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, 3.4, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          if (c.type === 'distance') {
+            const mx = (pa.x + pb.x) / 2, my = (pa.y + pb.y) / 2;
+            ctx.font = '10px system-ui, sans-serif';
+            ctx.fillStyle = color;
+            ctx.textAlign = 'center';
+            ctx.fillText(`d=${c.distance.toFixed(2)}m`, mx, my - 6);
+          }
+        }
+      }
+    }
+
+    drawRoleTag(frame, camera, w, h, text, color) {
+      const p = camera.project(V3.add(frame.position, [0, 0.16, 0]), w, h);
+      if (!p) return;
+      const ctx = this.ctx;
+      ctx.font = 'bold 10px system-ui, sans-serif';
+      ctx.fillStyle = color;
+      ctx.textAlign = 'center';
+      ctx.fillText(text, p.x, p.y);
     }
 
     collectPart(items, frame, camera, w, h, selected) {
